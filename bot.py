@@ -1,10 +1,11 @@
 import logging
 import random
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ========== ТОКЕН (ВСТАВЛЕН ПРЯМО В КОД) ==========
-TOKEN = "8604841967:AAFaclZhctIxD4DRIHWKT55giRVgBW5LOBo"
+# ========== ТОКЕН (ЧЕРЕЗ ПЕРЕМЕННУЮ ОКРУЖЕНИЯ) ==========
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8604841967:AAFaclZhctIxD4DRIHWKT55giRVgBW5LOBo")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -175,7 +176,7 @@ async def hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game["turn_index"] += 1
 
         if game["turn_index"] >= len(game["player_order"]):
-            await endgame(chat_id, context)
+            await endgame(chat_id, context, update)
         else:
             await send_turn(chat_id, context)
     else:
@@ -214,11 +215,11 @@ async def stay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game["turn_index"] += 1
 
     if game["turn_index"] >= len(game["player_order"]):
-        await endgame(chat_id, context)
+        await endgame(chat_id, context, update)
     else:
         await send_turn(chat_id, context)
 
-async def endgame(chat_id, context):
+async def endgame(chat_id, context, update=None):
     game = games[chat_id]
 
     dealer_cards = game["dealer_cards"]
@@ -240,7 +241,12 @@ async def endgame(chat_id, context):
             if chat_id not in stats:
                 stats[chat_id] = {}
             if player_id not in stats[chat_id]:
-                stats[chat_id][player_id] = {"name": update.effective_user.first_name, "wins": 0}
+                # Попробуем получить имя через update, если оно доступно
+                user_name = "Неизвестный"
+                if update and update.effective_user and update.effective_user.id == player_id:
+                    user_name = update.effective_user.first_name
+                
+                stats[chat_id][player_id] = {"name": user_name, "wins": 0}
             stats[chat_id][player_id]["wins"] += 1
         elif score == dealer_score:
             result += " (НИЧЬЯ) 🤝\n"
@@ -249,8 +255,8 @@ async def endgame(chat_id, context):
 
     await context.bot.send_message(chat_id=chat_id, text=result, parse_mode="Markdown")
 
-    del games[chat_id]
-    del lobbies[chat_id]
+    if chat_id in games: del games[chat_id]
+    if chat_id in lobbies: del lobbies[chat_id]
 
 async def cmd_endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -302,6 +308,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ЗАПУСК ==========
 def main():
+    if not TOKEN:
+        print("❌ Error: TELEGRAM_TOKEN or hardcoded TOKEN not found.")
+        return
+        
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
