@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 lobbies = {}
 games = {}
 stats = {}
-last_messages = {}  # Для удаления старых сообщений
+last_messages = {}
 
 # ========== ФУНКЦИЯ ПОЛУЧЕНИЯ ИМЕНИ ==========
 def get_user_name(user):
@@ -53,7 +53,6 @@ def calc_score(cards):
 def cards_str(cards):
     return " ".join(f"{c['rank']}{c['suit']}" for c in cards)
 
-# ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ УДАЛЕНИЯ СООБЩЕНИЙ ==========
 async def delete_previous_message(chat_id, context):
     if chat_id in last_messages:
         try:
@@ -160,10 +159,8 @@ async def send_turn(chat_id, context):
         [InlineKeyboardButton("✋ Хватит", callback_data="stay")]
     ]
 
-    # Удаляем предыдущее сообщение
     await delete_previous_message(chat_id, context)
 
-    # Отправляем новое
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=f"🎯 *Твой ход!*\n🎴 {cards_str(cards)}\n📊 Очки: {score}",
@@ -178,7 +175,6 @@ async def hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     user_id = query.from_user.id
 
-    # Удаляем сообщение с кнопками
     await delete_previous_message(chat_id, context)
 
     if chat_id not in games:
@@ -226,7 +222,6 @@ async def stay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     user_id = query.from_user.id
 
-    # Удаляем сообщение с кнопками
     await delete_previous_message(chat_id, context)
 
     if chat_id not in games:
@@ -266,7 +261,15 @@ async def endgame(chat_id, context):
     for player_id in game["player_order"]:
         cards = game["players_cards"][player_id]
         score = calc_score(cards)
-        result += f"👤 *Игрок:* {cards_str(cards)} = {score}"
+        
+        # Получаем имя игрока
+        try:
+            player = await context.bot.get_chat(player_id)
+            player_name = get_user_name(player)
+        except:
+            player_name = "Игрок"
+        
+        result += f"👤 *{player_name}:* {cards_str(cards)} = {score}"
 
         if score > 21:
             result += " (ПЕРЕБОР) ❌\n"
@@ -275,8 +278,9 @@ async def endgame(chat_id, context):
             if chat_id not in stats:
                 stats[chat_id] = {}
             if player_id not in stats[chat_id]:
-                stats[chat_id][player_id] = {"name": "Игрок", "wins": 0}
+                stats[chat_id][player_id] = {"name": player_name, "wins": 0}
             stats[chat_id][player_id]["wins"] += 1
+            stats[chat_id][player_id]["name"] = player_name
         elif score == dealer_score:
             result += " (НИЧЬЯ) 🤝\n"
         else:
@@ -315,6 +319,15 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in stats or not stats[chat_id]:
         await update.message.reply_text("🏆 Пока нет побед!")
         return
+
+    # Обновляем имена перед показом
+    for player_id in list(stats[chat_id].keys()):
+        try:
+            player = await context.bot.get_chat(int(player_id))
+            player_name = get_user_name(player)
+            stats[chat_id][player_id]["name"] = player_name
+        except:
+            pass
 
     top_list = sorted(stats[chat_id].items(), key=lambda x: x[1]["wins"], reverse=True)[:10]
 
