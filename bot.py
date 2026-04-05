@@ -1,8 +1,10 @@
 import logging
 import random
 import os
+import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import pytz  # ДОБАВИТЬ ЭТУ БИБЛИОТЕКУ
 
 # ========== ТОКЕН ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ ==========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -14,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 # ========== ХРАНИЛИЩА ==========
 lobbies = {}
 games = {}
-stats = {}
+stats = {}        # stats[chat_id][user_id] = {"name": str, "wins": int, "total_wins": int}
 last_messages = {}
 
 # ========== ФУНКЦИЯ ПОЛУЧЕНИЯ ИМЕНИ ==========
@@ -61,15 +63,36 @@ async def delete_previous_message(chat_id, context):
             pass
         del last_messages[chat_id]
 
+# ========== АВТОСБРОС ТОПА КАЖДОЕ ВОСКРЕСЕНЬЕ В 23:59 МСК ==========
+async def weekly_reset(context: ContextTypes.DEFAULT_TYPE):
+    """Сбрасывает недельные победы, обновляет общий счёт"""
+    global stats
+    
+    for chat_id in stats:
+        for user_id in stats[chat_id]:
+            # Добавляем недельные победы к общим
+            stats[chat_id][user_id]["total_wins"] = stats[chat_id][user_id].get("total_wins", 0) + stats[chat_id][user_id]["wins"]
+            # Сбрасываем недельные
+            stats[chat_id][user_id]["wins"] = 0
+    
+    # Уведомляем все чаты
+    for chat_id in stats:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🎉 *Новая неделя побед!* 🎉\n\nПобеждай и становись лидером этой недели! 🥳",
+            parse_mode="Markdown"
+        )
+
 # ========== КОМАНДЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🃏 *Блэкджек бот*\n\n"
-        "/bj - создать лобби\n"
-        "/join - присоединиться\n"
-        "/startgame - начать игру (только создатель)\n"
-        "/top - топ побед\n"
-        "/endgame - завершить игру",
+        "🎲 `/bj` — создать лобби\n"
+        "➕ `/join` — присоединиться\n"
+        "▶️ `/startgame` — начать игру (только создатель)\n"
+        "🏆 `/top` — глобальный топ\n"
+        "👤 `/profile` — твой профиль\n"
+        "⛔ `/endgame` — завершить игру (только создатель)",
         parse_mode="Markdown"
     )
 
@@ -113,7 +136,7 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lobby["players"].append(user_id)
     
-    # Собираем имена всех игроков в лобби
+    # Собираем имена всех игроков
     players_list = []
     for pid in lobby["players"]:
         try:
@@ -168,7 +191,6 @@ async def send_turn(chat_id, context):
     cards = game["players_cards"][player_id]
     score = calc_score(cards)
 
-    # Получаем имя игрока
     try:
         player = await context.bot.get_chat(player_id)
         player_name = get_user_name(player)
@@ -257,7 +279,6 @@ async def stay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     score = calc_score(game["players_cards"][user_id])
     
-    # Получаем имя игрока
     try:
         player = await context.bot.get_chat(user_id)
         player_name = get_user_name(player)
@@ -290,7 +311,6 @@ async def endgame(chat_id, context):
         cards = game["players_cards"][player_id]
         score = calc_score(cards)
         
-        # Получаем имя игрока
         try:
             player = await context.bot.get_chat(player_id)
             player_name = get_user_name(player)
@@ -303,12 +323,15 @@ async def endgame(chat_id, context):
             result += " (ПЕРЕБОР) ❌\n"
         elif dealer_score > 21 or score > dealer_score:
             result += " — ПОБЕДА! ✅\n"
+            
+            # Сохраняем победу
             if chat_id not in stats:
                 stats[chat_id] = {}
             if player_id not in stats[chat_id]:
-                stats[chat_id][player_id] = {"name": player_name, "wins": 0}
+                stats[chat_id][player_id] = {"name": player_name, "wins": 0, "total_wins": 0}
             stats[chat_id][player_id]["wins"] += 1
             stats[chat_id][player_id]["name"] = player_name
+            
         elif score == dealer_score:
             result += " (НИЧЬЯ) 🤝\n"
         else:
@@ -341,35 +364,55 @@ async def cmd_endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("⛔ *Игра завершена создателем!*", parse_mode="Markdown")
 
+# ========== ГЛОБАЛЬНЫЙ ТОП (по всем чатам) ==========
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    if chat_id not in stats or not stats[chat_id]:
-        await update.message.reply_text("🏆 Пока нет побед!")
+    # Собираем всех игроков из всех чатов
+    global_players = {}
+    
+    for chat_id in stats:
+        for user_id, data in stats[chat_id].items():
+            if user_id not in global_players:
+                global_players[user_id] = {"name": data["name"], "wins": 0}
+            global_players[user_id]["wins"] += data["wins"]
+    
+    if not global_players:
+        await update.message.reply_text("🏆 Пока нет побед! Сыграйте партию.")
         return
-
-    # Обновляем имена перед показом
-    for player_id in list(stats[chat_id].keys()):
-        try:
-            player = await context.bot.get_chat(int(player_id))
-            player_name = get_user_name(player)
-            stats[chat_id][player_id]["name"] = player_name
-        except:
-            pass
-
-    top_list = sorted(stats[chat_id].items(), key=lambda x: x[1]["wins"], reverse=True)[:10]
-
-    text = "🏆 *Топ побед в чате:*\n\n"
+    
+    top_list = sorted(global_players.items(), key=lambda x: x[1]["wins"], reverse=True)[:10]
+    
+    text = "🌍 *ГЛОБАЛЬНЫЙ ТОП* 🌍\n\n"
     for i, (uid, data) in enumerate(top_list, 1):
-        name = data["name"]
-        wins = data["wins"]
-        text += f"{i}. {name} — {wins} 🏅\n"
-
+        text += f"{i}. {data['name']} — {data['wins']} 🏅\n"
+    
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# ========== ОБРАБОТЧИК КНОПОК (ТОЛЬКО КНОПКИ) ==========
+# ========== ПРОФИЛЬ ИГРОКА ==========
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_name = get_user_name(update.effective_user)
+    
+    # Собираем статистику по всем чатам
+    total_wins = 0
+    weekly_wins = 0
+    
+    for chat_id in stats:
+        if user_id in stats[chat_id]:
+            weekly_wins += stats[chat_id][user_id].get("wins", 0)
+            total_wins += stats[chat_id][user_id].get("total_wins", 0)
+    
+    text = (
+        f"👤 *Профиль игрока*\n\n"
+        f"📛 Имя: {user_name}\n"
+        f"🏅 Побед на этой неделе: {weekly_wins}\n"
+        f"🏆 Всего побед за всё время: {total_wins}\n\n"
+        f"✨ Играй больше, чтобы попасть в глобальный топ!"
+    )
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+# ========== ОБРАБОТЧИК КНОПОК ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, что это точно нажатие на кнопку
     if not update.callback_query:
         return
     
@@ -386,15 +429,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
 
+    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("bj", bj))
     app.add_handler(CommandHandler("join", join))
     app.add_handler(CommandHandler("startgame", startgame))
     app.add_handler(CommandHandler("endgame", cmd_endgame))
     app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CallbackQueryHandler(button_handler))
+    
+    # Планировщик сброса топа по МСК (воскресенье 23:59 MSK = 20:59 UTC)
+    job_queue = app.job_queue
+    if job_queue:
+        # Устанавливаем московский часовой пояс
+        msk_tz = pytz.timezone('Europe/Moscow')
+        # Сброс каждое воскресенье в 23:59 по Москве
+        job_queue.run_daily(
+            weekly_reset, 
+            time=datetime.time(hour=20, minute=59, second=0),  # 20:59 UTC = 23:59 MSK
+            days=(6,),  # воскресенье в Python = 6
+            context=context
+        )
 
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен! Сброс топа по воскресеньям в 23:59 МСК")
     app.run_polling()
 
 if __name__ == "__main__":
