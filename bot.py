@@ -4,8 +4,10 @@ import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ========== ТОКЕН (ЧЕРЕЗ ПЕРЕМЕННУЮ ОКРУЖЕНИЯ) ==========
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "8604841967:AAFaclZhctIxD4DRIHWKT55giRVgBW5LOBo")
+# ========== ТОКЕН ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ ==========
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("Добавь TELEGRAM_BOT_TOKEN в переменные окружения")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -13,11 +15,20 @@ logging.basicConfig(level=logging.INFO)
 lobbies = {}
 games = {}
 stats = {}
+last_messages = {}  # Для удаления старых сообщений
 
-# ========== ФУНКЦИИ КАРТ ==========
+# ========== ФУНКЦИЯ ПОЛУЧЕНИЯ ИМЕНИ ==========
+def get_user_name(user):
+    if user.username:
+        return f"@{user.username}"
+    if user.first_name:
+        return user.first_name
+    return "Игрок"
+
+# ========== ФУНКЦИИ КАРТ (ПОЛНАЯ КОЛОДА 52 КАРТЫ) ==========
 def get_deck():
     suits = ["♥", "♦", "♣", "♠"]
-    ranks = ["6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+    ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
     deck = []
     for s in suits:
         for r in ranks:
@@ -42,6 +53,15 @@ def calc_score(cards):
 def cards_str(cards):
     return " ".join(f"{c['rank']}{c['suit']}" for c in cards)
 
+# ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ УДАЛЕНИЯ СООБЩЕНИЙ ==========
+async def delete_previous_message(chat_id, context):
+    if chat_id in last_messages:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=last_messages[chat_id])
+        except:
+            pass
+        del last_messages[chat_id]
+
 # ========== КОМАНДЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -57,7 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bj(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
+    user_name = get_user_name(update.effective_user)
 
     if chat_id in lobbies:
         await update.message.reply_text("❌ Лобби уже есть!")
@@ -79,10 +99,10 @@ async def bj(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
+    user_name = get_user_name(update.effective_user)
 
     if chat_id not in lobbies:
-        await update.message.reply_text("❌ Нет лобби! /bj")
+        await update.message.reply_text("❌ Нет лобби! Создайте /bj")
         return
 
     lobby = lobbies[chat_id]
@@ -140,12 +160,17 @@ async def send_turn(chat_id, context):
         [InlineKeyboardButton("✋ Хватит", callback_data="stay")]
     ]
 
-    await context.bot.send_message(
+    # Удаляем предыдущее сообщение
+    await delete_previous_message(chat_id, context)
+
+    # Отправляем новое
+    msg = await context.bot.send_message(
         chat_id=chat_id,
         text=f"🎯 *Твой ход!*\n🎴 {cards_str(cards)}\n📊 Очки: {score}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    last_messages[chat_id] = msg.message_id
 
 async def hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -153,14 +178,17 @@ async def hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     user_id = query.from_user.id
 
+    # Удаляем сообщение с кнопками
+    await delete_previous_message(chat_id, context)
+
     if chat_id not in games:
-        await query.edit_message_text("❌ Нет активной игры!")
+        await context.bot.send_message(chat_id=chat_id, text="❌ Нет активной игры!")
         return
 
     game = games[chat_id]
     current_id = game["player_order"][game["turn_index"]]
     if user_id != current_id:
-        await query.answer("Сейчас не твой ход!", show_alert=True)
+        await context.bot.send_message(chat_id=chat_id, text="⏳ Сейчас не твой ход!")
         return
 
     new_card = game["deck"].pop()
@@ -176,7 +204,7 @@ async def hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game["turn_index"] += 1
 
         if game["turn_index"] >= len(game["player_order"]):
-            await endgame(chat_id, context, update)
+            await endgame(chat_id, context)
         else:
             await send_turn(chat_id, context)
     else:
@@ -184,11 +212,13 @@ async def hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🃏 Взять карту", callback_data="hit")],
             [InlineKeyboardButton("✋ Хватит", callback_data="stay")]
         ]
-        await query.edit_message_text(
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
             text=f"✅ Взял карту!\n\n🎯 *Твой ход*\n🎴 {cards_str(game['players_cards'][user_id])}\n📊 Очки: {score}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+        last_messages[chat_id] = msg.message_id
 
 async def stay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -196,30 +226,34 @@ async def stay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     user_id = query.from_user.id
 
+    # Удаляем сообщение с кнопками
+    await delete_previous_message(chat_id, context)
+
     if chat_id not in games:
-        await query.edit_message_text("❌ Нет активной игры!")
+        await context.bot.send_message(chat_id=chat_id, text="❌ Нет активной игры!")
         return
 
     game = games[chat_id]
     current_id = game["player_order"][game["turn_index"]]
     if user_id != current_id:
-        await query.answer("Сейчас не твой ход!", show_alert=True)
+        await context.bot.send_message(chat_id=chat_id, text="⏳ Сейчас не твой ход!")
         return
 
     score = calc_score(game["players_cards"][user_id])
+    user_name = get_user_name(update.effective_user)
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"✋ {update.effective_user.first_name} остановился с {score} очками"
+        text=f"✋ {user_name} остановился с {score} очками"
     )
 
     game["turn_index"] += 1
 
     if game["turn_index"] >= len(game["player_order"]):
-        await endgame(chat_id, context, update)
+        await endgame(chat_id, context)
     else:
         await send_turn(chat_id, context)
 
-async def endgame(chat_id, context, update=None):
+async def endgame(chat_id, context):
     game = games[chat_id]
 
     dealer_cards = game["dealer_cards"]
@@ -241,12 +275,7 @@ async def endgame(chat_id, context, update=None):
             if chat_id not in stats:
                 stats[chat_id] = {}
             if player_id not in stats[chat_id]:
-                # Попробуем получить имя через update, если оно доступно
-                user_name = "Неизвестный"
-                if update and update.effective_user and update.effective_user.id == player_id:
-                    user_name = update.effective_user.first_name
-                
-                stats[chat_id][player_id] = {"name": user_name, "wins": 0}
+                stats[chat_id][player_id] = {"name": "Игрок", "wins": 0}
             stats[chat_id][player_id]["wins"] += 1
         elif score == dealer_score:
             result += " (НИЧЬЯ) 🤝\n"
@@ -255,8 +284,10 @@ async def endgame(chat_id, context, update=None):
 
     await context.bot.send_message(chat_id=chat_id, text=result, parse_mode="Markdown")
 
-    if chat_id in games: del games[chat_id]
-    if chat_id in lobbies: del lobbies[chat_id]
+    del games[chat_id]
+    del lobbies[chat_id]
+    if chat_id in last_messages:
+        del last_messages[chat_id]
 
 async def cmd_endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -273,6 +304,8 @@ async def cmd_endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in games:
         del games[chat_id]
     del lobbies[chat_id]
+    if chat_id in last_messages:
+        del last_messages[chat_id]
 
     await update.message.reply_text("⛔ *Игра завершена создателем!*", parse_mode="Markdown")
 
@@ -308,10 +341,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ЗАПУСК ==========
 def main():
-    if not TOKEN:
-        print("❌ Error: TELEGRAM_TOKEN or hardcoded TOKEN not found.")
-        return
-        
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
