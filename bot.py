@@ -25,7 +25,7 @@ def get_user_name(user):
         return user.first_name
     return "Игрок"
 
-# ========== ФУНКЦИИ КАРТ (ПОЛНАЯ КОЛОДА 52 КАРТЫ) ==========
+# ========== ФУНКЦИИ КАРТ ==========
 def get_deck():
     suits = ["♥", "♦", "♣", "♠"]
     ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
@@ -88,11 +88,9 @@ async def bj(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "active": False
     }
 
-    keyboard = [[InlineKeyboardButton("🔥 Присоединиться", callback_data="join")]]
     await update.message.reply_text(
-        f"🎲 *Лобби создано!*\n👑 Создатель: {user_name}\n👥 Игроков: 1",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"🎲 *Лобби создано!*\n👑 Создатель: {user_name}\n👥 Игроков: 1\n\n📢 Другие игроки, введите `/join` чтобы присоединиться!",
+        parse_mode="Markdown"
     )
 
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,12 +103,28 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lobby = lobbies[chat_id]
+    if lobby.get("active", False):
+        await update.message.reply_text("❌ Игра уже идёт!")
+        return
+
     if user_id in lobby["players"]:
         await update.message.reply_text("⚠️ Ты уже в лобби!")
         return
 
     lobby["players"].append(user_id)
-    await update.message.reply_text(f"✅ {user_name} присоединился! 👥 {len(lobby['players'])} игроков")
+    
+    # Собираем имена всех игроков в лобби
+    players_list = []
+    for pid in lobby["players"]:
+        try:
+            p = await context.bot.get_chat(pid)
+            players_list.append(get_user_name(p))
+        except:
+            players_list.append("Игрок")
+    
+    await update.message.reply_text(
+        f"✅ {user_name} присоединился!\n👥 Игроков: {len(lobby['players'])}\n📋 В лобби: {', '.join(players_list)}"
+    )
 
 async def startgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -122,7 +136,7 @@ async def startgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lobby = lobbies[chat_id]
     if user_id != lobby["owner"]:
-        await update.message.reply_text("❌ Только создатель!")
+        await update.message.reply_text("❌ Только создатель может начать игру!")
         return
     if len(lobby["players"]) < 2:
         await update.message.reply_text("❌ Нужно минимум 2 игрока!")
@@ -154,6 +168,13 @@ async def send_turn(chat_id, context):
     cards = game["players_cards"][player_id]
     score = calc_score(cards)
 
+    # Получаем имя игрока
+    try:
+        player = await context.bot.get_chat(player_id)
+        player_name = get_user_name(player)
+    except:
+        player_name = "Игрок"
+
     keyboard = [
         [InlineKeyboardButton("🃏 Взять карту", callback_data="hit")],
         [InlineKeyboardButton("✋ Хватит", callback_data="stay")]
@@ -163,7 +184,7 @@ async def send_turn(chat_id, context):
 
     msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=f"🎯 *Твой ход!*\n🎴 {cards_str(cards)}\n📊 Очки: {score}",
+        text=f"🎯 *Ход игрока {player_name}!*\n\n🎴 Твои карты: {cards_str(cards)}\n📊 Очки: {score}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -210,7 +231,7 @@ async def hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         msg = await context.bot.send_message(
             chat_id=chat_id,
-            text=f"✅ Взял карту!\n\n🎯 *Твой ход*\n🎴 {cards_str(game['players_cards'][user_id])}\n📊 Очки: {score}",
+            text=f"✅ Взял карту!\n\n🎴 {cards_str(game['players_cards'][user_id])}\n📊 Очки: {score}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -235,10 +256,17 @@ async def stay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     score = calc_score(game["players_cards"][user_id])
-    user_name = get_user_name(update.effective_user)
+    
+    # Получаем имя игрока
+    try:
+        player = await context.bot.get_chat(user_id)
+        player_name = get_user_name(player)
+    except:
+        player_name = "Игрок"
+    
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"✋ {user_name} остановился с {score} очками"
+        text=f"✋ {player_name} остановился с {score} очками"
     )
 
     game["turn_index"] += 1
@@ -339,18 +367,20 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
+# ========== ОБРАБОТЧИК КНОПОК (ТОЛЬКО КНОПКИ) ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, что это точно нажатие на кнопку
+    if not update.callback_query:
+        return
+    
     query = update.callback_query
+    await query.answer()
     data = query.data
 
-    if data == "join":
-        await join(update, context)
-    elif data == "hit":
+    if data == "hit":
         await hit(update, context)
     elif data == "stay":
         await stay(update, context)
-
-    await query.answer()
 
 # ========== ЗАПУСК ==========
 def main():
